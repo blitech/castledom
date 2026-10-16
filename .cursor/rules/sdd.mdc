@@ -1,0 +1,19 @@
+---
+description: Méthodologie Spec-Driven Development (SDD) pour Castledom
+alwaysApply: true
+---
+
+# SDD Castledom
+
+Avant toute feature non triviale (gameplay, net, API crate) :
+
+1. Lire `docs/SDD.md` et le skill `.cursor/skills/castledom-dev/SKILL.md`
+2. Créer ou mettre à jour une spec dans `specs/active/` (copier `specs/_template.md`)
+3. Faire valider l’intent / hors-scope si ambigu
+4. Implémenter **uniquement** ce que la spec décrit
+5. Exécuter les checks de la section Vérification
+6. À la clôture : `status: done`, déplacer vers `specs/done/` ou laisser et noter les écarts
+
+Hotfix < ~30 min : mini-section Bugfix dans une spec courte OK.
+
+Ne pas inventer de scope hors spec. Si besoin d’étendre → mettre à jour la spec d’abord.

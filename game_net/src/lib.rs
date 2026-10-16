@@ -3,7 +3,8 @@
 use bevy::prelude::*;
 use bevy_matchbox::prelude::*;
 use game_core::{
-    FactionId, GameInput, LobbyPhase, LobbyState, MatchMode, SlotKind, UnitType, MAX_FACTIONS,
+    BuildingKind, FactionId, GameInput, LobbyPhase, LobbyState, MatchMode, PlaceBuildingCmd,
+    SlotKind, MAX_FACTIONS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +20,9 @@ pub enum NetMessage {
     TickInput {
         tick: u32,
         faction: u8,
-        produce: Option<u8>,
+        place_kind: Option<u8>,
+        place_x: i16,
+        place_y: i16,
     },
     StartMatch { seed: u32 },
 }
@@ -34,21 +37,20 @@ impl NetMessage {
     }
 }
 
-pub fn encode_produce(p: Option<UnitType>) -> Option<u8> {
-    p.map(|u| match u {
-        UnitType::Melee => 0,
-        UnitType::Ranged => 1,
-        UnitType::Tank => 2,
-    })
+pub fn encode_place(place: Option<PlaceBuildingCmd>) -> (Option<u8>, i16, i16) {
+    match place {
+        Some(p) => (Some(p.kind.as_u8()), p.tile_x, p.tile_y),
+        None => (None, 0, 0),
+    }
 }
 
-pub fn decode_produce(p: Option<u8>) -> Option<UnitType> {
-    match p {
-        Some(0) => Some(UnitType::Melee),
-        Some(1) => Some(UnitType::Ranged),
-        Some(2) => Some(UnitType::Tank),
-        _ => None,
-    }
+pub fn decode_place(kind: Option<u8>, x: i16, y: i16) -> Option<PlaceBuildingCmd> {
+    kind.and_then(BuildingKind::from_u8)
+        .map(|k| PlaceBuildingCmd {
+            kind: k,
+            tile_x: x,
+            tile_y: y,
+        })
 }
 
 #[derive(Resource, Clone, Debug)]
@@ -204,13 +206,15 @@ fn receive_net_messages(
             NetMessage::TickInput {
                 tick,
                 faction,
-                produce,
+                place_kind,
+                place_x,
+                place_y,
             } => {
                 buffer.insert(
                     tick,
                     FactionId(faction),
                     GameInput {
-                        produce: decode_produce(produce),
+                        place: decode_place(place_kind, place_x, place_y),
                     },
                 );
             }
@@ -250,10 +254,13 @@ pub fn send_tick_input(
     faction: FactionId,
     input: GameInput,
 ) {
+    let (place_kind, place_x, place_y) = encode_place(input.place);
     let msg = NetMessage::TickInput {
         tick,
         faction: faction.0,
-        produce: encode_produce(input.produce),
+        place_kind,
+        place_x,
+        place_y,
     };
     broadcast(socket, &msg);
 }

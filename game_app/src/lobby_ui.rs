@@ -6,6 +6,10 @@ use game_core::{LobbyState, MatchMode, SlotKind};
 #[derive(Component)]
 pub struct UiRoot;
 
+/// Caméra 2D du menu / lobby (Bevy UI ne s’affiche pas sans caméra).
+#[derive(Component)]
+pub struct MenuCamera;
+
 #[derive(Component)]
 pub struct JoinCodeLabel;
 
@@ -30,6 +34,10 @@ pub enum LobbyAction {
     ToggleAi { index: usize },
     Start,
     Back,
+}
+
+pub fn spawn_menu_camera(commands: &mut Commands) {
+    commands.spawn((Camera2d, MenuCamera));
 }
 
 pub fn setup_home(commands: &mut Commands) {

@@ -13,12 +13,13 @@ use game_net::{
     PeerRegistry, RemoteJoinRequest, RemoteLobbySync, RemoteSlotClaim, RemoteStartMatch,
 };
 use game_render::{
-    spawn_match_visuals, CastleVisual, GameRenderPlugin, GameSim, HudRoot, LocalPlayer,
-    LocalProductionIntent, MainCamera, MapBackground, ObstacleVisual, PointVisual, UnitVisual,
-    VictoryHud,
+    spawn_match_visuals, BuildBarRoot, BuildingVisual, CastleVisual, GameRenderPlugin, GameSim,
+    GhostPreview, HudRoot, LocalPlaceIntent, LocalPlayer, MainCamera, MapBackground,
+    ObstacleVisual, PixelAtlas, PointVisual, UnitVisual, VictoryHud,
 };
 use lobby_ui::{
-    setup_home, setup_lobby_screen, HomeAction, JoinCodeBuffer, LobbyAction, UiRoot,
+    setup_home, setup_lobby_screen, spawn_menu_camera, HomeAction, JoinCodeBuffer, LobbyAction,
+    MenuCamera, UiRoot,
 };
 
 #[derive(States, Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -77,6 +78,7 @@ pub fn run() {
         .add_plugins(GameRenderPlugin)
         .add_plugins(GameNetPlugin)
         .add_systems(Startup, |mut commands: Commands| {
+            spawn_menu_camera(&mut commands);
             setup_home(&mut commands);
         })
         .add_systems(
@@ -468,7 +470,15 @@ fn handle_remote_start(
     }
 }
 
-fn start_playing(mut commands: Commands, lobby: Res<ActiveLobby>) {
+fn start_playing(
+    mut commands: Commands,
+    lobby: Res<ActiveLobby>,
+    atlas: Res<PixelAtlas>,
+    menu_cams: Query<Entity, With<MenuCamera>>,
+) {
+    for e in menu_cams.iter() {
+        commands.entity(e).despawn();
+    }
     let config = lobby.0.to_match_config();
     let n = config.faction_count();
     commands.insert_resource(LocalPlayer {
@@ -481,7 +491,7 @@ fn start_playing(mut commands: Commands, lobby: Res<ActiveLobby>) {
     commands.insert_resource(GameSim(SimWorld::new(config)));
     commands.insert_resource(SimClock::default());
     commands.insert_resource(SimInputs(InputBus::default()));
-    spawn_match_visuals(&mut commands);
+    spawn_match_visuals(&mut commands, &atlas);
 }
 
 fn drive_simulation(
@@ -490,7 +500,7 @@ fn drive_simulation(
     mut sim: ResMut<GameSim>,
     mut bus: ResMut<SimInputs>,
     mut ai: ResMut<AiSet>,
-    mut intent: ResMut<LocalProductionIntent>,
+    mut intent: ResMut<LocalPlaceIntent>,
     mut victory: ResMut<VictoryHud>,
     local: Res<LocalPlayer>,
     lobby: Option<Res<ActiveLobby>>,
@@ -513,7 +523,7 @@ fn drive_simulation(
         bus.0.clear();
 
         let local_input = GameInput {
-            produce: intent.produce.take(),
+            place: intent.place.take(),
         };
 
         if local_only {
@@ -566,13 +576,19 @@ fn drive_simulation(
 
 fn playing_escape(
     keys: Res<ButtonInput<KeyCode>>,
+    mut drag: ResMut<game_render::BuildDrag>,
     mut next: ResMut<NextState<AppState>>,
     mut commands: Commands,
 ) {
     if keys.just_pressed(KeyCode::Escape) {
+        // Esc cancels an in-progress building drag first (do not leave match).
+        if drag.kind.take().is_some() {
+            return;
+        }
         commands.remove_resource::<ActiveLobby>();
         commands.remove_resource::<MatchboxSocket>();
         next.set(AppState::Home);
+        spawn_menu_camera(&mut commands);
         setup_home(&mut commands);
     }
 }
@@ -585,7 +601,10 @@ fn cleanup_playing(
             With<MainCamera>,
             With<MapBackground>,
             With<HudRoot>,
+            With<BuildBarRoot>,
+            With<GhostPreview>,
             With<UnitVisual>,
+            With<BuildingVisual>,
             With<CastleVisual>,
             With<PointVisual>,
             With<ObstacleVisual>,

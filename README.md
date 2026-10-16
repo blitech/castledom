@@ -15,18 +15,29 @@ rustup target add wasm32-unknown-unknown
 cargo install trunk   # si besoin
 ```
 
-## Lancer en navigateur
+Notes d’install détaillées (ce qui manquait au premier import) : [docs/SETUP.md](docs/SETUP.md).  
+Méthodologie Spec-Driven Development : [docs/SDD.md](docs/SDD.md) — specs dans `specs/`.
 
-```bash
-trunk serve
+## Lancer (tout-en-un)
+
+```bat
+scripts\dev.bat
 ```
 
-Ouvre `http://127.0.0.1:8080`.
+Démarre le **signaling** Matchbox + **Trunk** (WASM). Ouvre `http://127.0.0.1:8080`.  
+(Équivalent PowerShell : `.\scripts\dev.ps1`.)
 
-## Desktop (natif)
+| Variante | CMD / bat | PowerShell |
+|----------|-----------|------------|
+| Solo (sans signaling) | `scripts\dev.bat -Solo` | `.\scripts\dev.ps1 -Solo` |
+| Desktop natif + signaling | `scripts\dev.bat -Desktop` | `.\scripts\dev.ps1 -Desktop` |
+
+### Commandes séparées
 
 ```bash
-cargo run -p game_app --bin castledom
+trunk serve                              # web seul → http://127.0.0.1:8080
+cargo run -p game_app --bin castledom    # desktop natif
+cargo run -p signaling                   # multi → ws://127.0.0.1:3536/castledom_<code>
 ```
 
 ## Lobby (solo ou multi)
@@ -36,25 +47,17 @@ cargo run -p game_app --bin castledom
 3. **Rejoindre** → tape le code puis *Rejoindre*
 4. Host : mode 1v1/2v2, toggle IA sur slots libres, **Verrouiller & Lancer**
 
-### Multijoueur (signaling)
-
-```bash
-cargo run -p signaling
-```
-
-Puis ouvre 2+ clients (onglets / appareils) sur le même code.
-
-Salon Matchbox : `ws://127.0.0.1:3536/castledom_<code>`
-
+Multijoueur : avec `.\scripts\dev.ps1` (ou `cargo run -p signaling` à part), ouvre 2+ clients sur le même code.
 ## Contrôles
 
-| Touche | Action |
+| Action | Détail |
 |--------|--------|
-| 1 / 2 / 3 | Produire Melee / Ranged / Tank |
+| Drag & drop barre bas | Poser Caserne / Archerie / Tour de mage / Temple |
+| HUD haut-gauche | Gold + revenu / s |
 | WASD / flèches | Caméra |
 | Clic droit + glisser | Pan |
 | Molette | Zoom |
-| Esc | Retour menu |
+| Esc | Annule pose en cours, sinon retour menu |
 
 ## Crates
 

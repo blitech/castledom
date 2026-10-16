@@ -1,21 +1,34 @@
 use crate::flow_field::FlowFieldSet;
-use crate::input::{InputBus, UnitType};
+use crate::input::{
+    footprint_center, mitigate_damage, BuildingKind, DamageType, InputBus, Targeting, UnitType,
+    TILE_SIZE,
+};
 use crate::types::{FactionId, MatchConfig, TeamId};
 use crate::TICK_DT;
 
 pub const MAP_WIDTH: f32 = 960.0;
 pub const MAP_HEIGHT: f32 = 640.0;
+pub const MAP_TILES_X: i16 = 30;
+pub const MAP_TILES_Y: i16 = 20;
 
 const CASTLE_HP: f32 = 1200.0;
-const BASE_INCOME: f32 = 8.0;
-const POINT_INCOME: f32 = 6.0;
+const CASTLE_FOOTPRINT: (u8, u8) = (2, 2);
+pub const BASE_INCOME: f32 = 8.0;
+pub const POINT_INCOME: f32 = 6.0;
+const STARTING_GOLD: f32 = 15.0;
 const CAPTURE_RATE: f32 = 25.0;
-const CASTLE_ATTACK_RANGE: f32 = 28.0;
+const CASTLE_ATTACK_RANGE: f32 = 36.0;
 const CASTLE_DPS: f32 = 35.0;
+const CASTLE_ARMOR_PHYS: f32 = 30.0;
+const CASTLE_ARMOR_MAG: f32 = 15.0;
+/// Max distance from an ally anchor to place a new building (world units).
+pub const DEPLOY_RADIUS: f32 = TILE_SIZE * 5.0;
 
 #[derive(Clone, Debug)]
 pub struct Castle {
     pub faction: FactionId,
+    pub tile_x: i16,
+    pub tile_y: i16,
     pub x: f32,
     pub y: f32,
     pub hp: f32,
@@ -25,6 +38,10 @@ pub struct Castle {
 impl Castle {
     pub fn alive(&self) -> bool {
         self.hp > 0.0
+    }
+
+    pub fn footprint(&self) -> (u8, u8) {
+        CASTLE_FOOTPRINT
     }
 }
 
@@ -50,6 +67,23 @@ pub struct SimUnit {
     pub attack_cd: f32,
 }
 
+#[derive(Clone, Debug)]
+pub struct SimBuilding {
+    pub id: u32,
+    pub faction: FactionId,
+    pub kind: BuildingKind,
+    pub tile_x: i16,
+    pub tile_y: i16,
+    pub produce_cd: f32,
+}
+
+impl SimBuilding {
+    pub fn center(&self) -> (f32, f32) {
+        let (fw, fh) = self.kind.footprint();
+        footprint_center(self.tile_x, self.tile_y, fw, fh)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VictoryState {
     Ongoing,
@@ -60,6 +94,7 @@ pub enum VictoryState {
 pub struct TickResult {
     pub victory: VictoryState,
     pub units_spawned: u32,
+    pub buildings_placed: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -70,20 +105,26 @@ pub struct SimWorld {
     pub castles: Vec<Castle>,
     pub points: Vec<CapturePoint>,
     pub units: Vec<SimUnit>,
+    pub buildings: Vec<SimBuilding>,
     pub obstacles: Vec<(f32, f32, f32, f32)>,
     pub flows: FlowFieldSet,
     next_unit_id: u32,
+    next_building_id: u32,
     spawn_jitter: u32,
 }
 
 impl SimWorld {
     pub fn new(config: MatchConfig) -> Self {
         let n = config.faction_count();
-        let spawns = spawn_positions(n);
+        let spawns = spawn_tile_positions(n);
         let mut castles = Vec::with_capacity(n);
-        for (i, &(x, y)) in spawns.iter().enumerate() {
+        for (i, &(tx, ty)) in spawns.iter().enumerate() {
+            let (fw, fh) = CASTLE_FOOTPRINT;
+            let (x, y) = footprint_center(tx, ty, fw, fh);
             castles.push(Castle {
                 faction: FactionId(i as u8),
+                tile_x: tx,
+                tile_y: ty,
                 x,
                 y,
                 hp: CASTLE_HP,
@@ -96,15 +137,17 @@ impl SimWorld {
         let flows = FlowFieldSet::new(&obstacles);
 
         Self {
-            gold: vec![40.0; n],
+            gold: vec![STARTING_GOLD; n],
             config,
             tick: 0,
             castles,
             points,
             units: Vec::with_capacity(512),
+            buildings: Vec::with_capacity(64),
             obstacles,
             flows,
             next_unit_id: 1,
+            next_building_id: 1,
             spawn_jitter: 0,
         }
     }
@@ -117,12 +160,25 @@ impl SimWorld {
         self.team_of(a) == self.team_of(b)
     }
 
+    /// Passive income rate (gold / second) for HUD.
+    pub fn income_per_sec(&self, faction: FactionId) -> f32 {
+        let mut inc = BASE_INCOME;
+        for p in &self.points {
+            if p.owner == Some(faction) {
+                inc += POINT_INCOME;
+            }
+        }
+        inc
+    }
+
     pub fn tick(&mut self, bus: &InputBus) -> TickResult {
         self.tick = self.tick.wrapping_add(1);
-        let mut spawned = 0u32;
+        let mut units_spawned = 0u32;
+        let mut buildings_placed = 0u32;
 
         self.apply_income();
-        spawned += self.apply_production(bus);
+        buildings_placed += self.apply_placements(bus);
+        units_spawned += self.apply_building_production();
         self.update_units_movement();
         self.update_combat();
         self.update_capture_points();
@@ -130,7 +186,8 @@ impl SimWorld {
 
         TickResult {
             victory,
-            units_spawned: spawned,
+            units_spawned,
+            buildings_placed,
         }
     }
 
@@ -148,42 +205,185 @@ impl SimWorld {
         }
     }
 
-    fn apply_production(&mut self, bus: &InputBus) -> u32 {
-        let n = self.config.faction_count();
-        let mut spawned = 0u32;
-        for i in 0..n {
-            let faction = FactionId(i as u8);
-            let Some(castle) = self.castles.iter().find(|c| c.faction == faction && c.alive())
-            else {
-                continue;
-            };
-            let (cx, cy) = (castle.x, castle.y);
-            let input = bus.get(faction);
-            if let Some(ut) = input.produce {
-                let cost = ut.cost();
-                if self.gold[i] >= cost {
-                    self.gold[i] -= cost;
-                    self.spawn_jitter = self.spawn_jitter.wrapping_add(1);
-                    let j = (self.spawn_jitter % 7) as f32 - 3.0;
-                    let angle = (self.spawn_jitter as f32) * 0.7;
-                    let sx = cx + angle.cos() * 28.0 + j;
-                    let sy = cy + angle.sin() * 28.0;
-                    self.units.push(SimUnit {
-                        id: self.next_unit_id,
-                        faction,
-                        unit_type: ut,
-                        x: sx.clamp(8.0, MAP_WIDTH - 8.0),
-                        y: sy.clamp(8.0, MAP_HEIGHT - 8.0),
-                        hp: ut.hp(),
-                        max_hp: ut.hp(),
-                        attack_cd: 0.0,
-                    });
-                    self.next_unit_id = self.next_unit_id.wrapping_add(1);
-                    spawned += 1;
+    pub fn can_place(&self, faction: FactionId, kind: BuildingKind, tile_x: i16, tile_y: i16) -> bool {
+        let i = faction.index();
+        if i >= self.gold.len() || self.gold[i] < kind.cost() {
+            return false;
+        }
+        if !self
+            .castles
+            .iter()
+            .any(|c| c.faction == faction && c.alive())
+        {
+            return false;
+        }
+        let (fw, fh) = kind.footprint();
+        if !footprint_in_bounds(tile_x, tile_y, fw, fh) {
+            return false;
+        }
+        if self.footprint_blocked(tile_x, tile_y, fw, fh) {
+            return false;
+        }
+        self.within_deploy_radius(faction, tile_x, tile_y, fw, fh)
+    }
+
+    fn footprint_blocked(&self, tile_x: i16, tile_y: i16, fw: u8, fh: u8) -> bool {
+        for c in &self.castles {
+            let (cw, ch) = c.footprint();
+            if footprints_overlap(tile_x, tile_y, fw, fh, c.tile_x, c.tile_y, cw, ch) {
+                return true;
+            }
+        }
+        for b in &self.buildings {
+            let (bw, bh) = b.kind.footprint();
+            if footprints_overlap(tile_x, tile_y, fw, fh, b.tile_x, b.tile_y, bw, bh) {
+                return true;
+            }
+        }
+        let (cx, cy) = footprint_center(tile_x, tile_y, fw, fh);
+        let hw = fw as f32 * TILE_SIZE * 0.5;
+        let hh = fh as f32 * TILE_SIZE * 0.5;
+        for &(ox, oy, ow, oh) in &self.obstacles {
+            if aabb_overlap(cx, cy, hw, hh, ox, oy, ow * 0.5, oh * 0.5) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn within_deploy_radius(
+        &self,
+        faction: FactionId,
+        tile_x: i16,
+        tile_y: i16,
+        fw: u8,
+        fh: u8,
+    ) -> bool {
+        let team = self.team_of(faction);
+        let (bx, by) = footprint_center(tile_x, tile_y, fw, fh);
+        for c in &self.castles {
+            if self.team_of(c.faction) == team && c.alive() {
+                if dist(bx, by, c.x, c.y) <= DEPLOY_RADIUS {
+                    return true;
                 }
             }
         }
+        for b in &self.buildings {
+            if self.team_of(b.faction) == team {
+                let (ax, ay) = b.center();
+                if dist(bx, by, ax, ay) <= DEPLOY_RADIUS {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn apply_placements(&mut self, bus: &InputBus) -> u32 {
+        let n = self.config.faction_count();
+        let mut placed = 0u32;
+        for i in 0..n {
+            let faction = FactionId(i as u8);
+            let input = bus.get(faction);
+            let Some(cmd) = input.place else {
+                continue;
+            };
+            if !self.can_place(faction, cmd.kind, cmd.tile_x, cmd.tile_y) {
+                continue;
+            }
+            self.gold[i] -= cmd.kind.cost();
+            self.buildings.push(SimBuilding {
+                id: self.next_building_id,
+                faction,
+                kind: cmd.kind,
+                tile_x: cmd.tile_x,
+                tile_y: cmd.tile_y,
+                produce_cd: cmd.kind.produce_interval() * 0.35,
+            });
+            self.next_building_id = self.next_building_id.wrapping_add(1);
+            placed += 1;
+        }
+        placed
+    }
+
+    fn apply_building_production(&mut self) -> u32 {
+        let mut spawned = 0u32;
+        let mut spawns: Vec<(FactionId, UnitType, f32, f32)> = Vec::new();
+
+        for b in &mut self.buildings {
+            b.produce_cd -= TICK_DT;
+            if b.produce_cd > 0.0 {
+                continue;
+            }
+            b.produce_cd = b.kind.produce_interval();
+            let (cx, cy) = b.center();
+            self.spawn_jitter = self.spawn_jitter.wrapping_add(1);
+            let angle = (self.spawn_jitter as f32) * 0.9;
+            let j = (self.spawn_jitter % 5) as f32 - 2.0;
+            let sx = cx + angle.cos() * (TILE_SIZE * 1.4) + j;
+            let sy = cy + angle.sin() * (TILE_SIZE * 1.4);
+            spawns.push((
+                b.faction,
+                b.kind.produces(),
+                sx.clamp(8.0, MAP_WIDTH - 8.0),
+                sy.clamp(8.0, MAP_HEIGHT - 8.0),
+            ));
+        }
+
+        for (faction, ut, x, y) in spawns {
+            self.units.push(SimUnit {
+                id: self.next_unit_id,
+                faction,
+                unit_type: ut,
+                x,
+                y,
+                hp: ut.hp(),
+                max_hp: ut.hp(),
+                attack_cd: 0.0,
+            });
+            self.next_unit_id = self.next_unit_id.wrapping_add(1);
+            spawned += 1;
+        }
         spawned
+    }
+
+    /// Suggest a free tile near anchors for AI / tools.
+    pub fn find_build_site(&self, faction: FactionId, kind: BuildingKind) -> Option<(i16, i16)> {
+        let (fw, fh) = kind.footprint();
+        let mut anchors: Vec<(f32, f32)> = Vec::new();
+        let team = self.team_of(faction);
+        for c in &self.castles {
+            if self.team_of(c.faction) == team && c.alive() {
+                anchors.push((c.x, c.y));
+            }
+        }
+        for b in &self.buildings {
+            if self.team_of(b.faction) == team {
+                anchors.push(b.center());
+            }
+        }
+        if anchors.is_empty() {
+            return None;
+        }
+
+        let mut candidates: Vec<(i16, i16, f32)> = Vec::new();
+        for &(ax, ay) in &anchors {
+            let (atx, aty) = crate::input::world_to_tile(ax, ay);
+            for dy in -6i16..=6 {
+                for dx in -6i16..=6 {
+                    let tx = atx + dx;
+                    let ty = aty + dy;
+                    if !self.can_place(faction, kind, tx, ty) {
+                        continue;
+                    }
+                    let (cx, cy) = footprint_center(tx, ty, fw, fh);
+                    let d = dist2(ax, ay, cx, cy);
+                    candidates.push((tx, ty, d));
+                }
+            }
+        }
+        candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Less));
+        candidates.first().map(|&(x, y, _)| (x, y))
     }
 
     fn primary_goal(&self, faction: FactionId) -> (f32, f32) {
@@ -244,7 +444,7 @@ impl SimWorld {
             .map(|i| self.primary_goal(FactionId(i as u8)))
             .collect();
 
-        let snapshot: Vec<(u32, FactionId, TeamId, f32, f32, f32)> = self
+        let snapshot: Vec<(u32, FactionId, TeamId, f32, f32, f32, UnitType, f32, f32)> = self
             .units
             .iter()
             .map(|u| {
@@ -255,6 +455,9 @@ impl SimWorld {
                     u.x,
                     u.y,
                     u.unit_type.radius(),
+                    u.unit_type,
+                    u.hp,
+                    u.max_hp,
                 )
             })
             .collect();
@@ -272,7 +475,7 @@ impl SimWorld {
             let mut vy = fy;
             let my_team = self.config.team_for(unit.faction);
 
-            for &(id, _f, _t, ox, oy, r) in &snapshot {
+            for &(id, _f, _t, ox, oy, r, ..) in &snapshot {
                 if id == unit.id {
                     continue;
                 }
@@ -288,7 +491,19 @@ impl SimWorld {
                 }
             }
 
-            if let Some((ex, ey)) = nearest_enemy_pos(my_team, unit.x, unit.y, &snapshot) {
+            if unit.unit_type.heal_power() > 0.0 {
+                if let Some((tx, ty)) =
+                    nearest_wounded_ally(my_team, unit.id, unit.x, unit.y, &snapshot)
+                {
+                    let dx = tx - unit.x;
+                    let dy = ty - unit.y;
+                    let d = (dx * dx + dy * dy).sqrt().max(0.1);
+                    if d < unit.unit_type.range() * 2.0 {
+                        vx = dx / d;
+                        vy = dy / d;
+                    }
+                }
+            } else if let Some((ex, ey)) = nearest_enemy_pos(my_team, unit.x, unit.y, &snapshot) {
                 let dx = ex - unit.x;
                 let dy = ey - unit.y;
                 let d = (dx * dx + dy * dy).sqrt().max(0.1);
@@ -330,6 +545,7 @@ impl SimWorld {
             .collect();
 
         let mut unit_dmg: Vec<(usize, f32)> = Vec::new();
+        let mut unit_heal: Vec<(usize, f32)> = Vec::new();
         let mut castle_dmg: Vec<(usize, f32)> = Vec::new();
         let mut attackers: Vec<usize> = Vec::new();
 
@@ -337,38 +553,114 @@ impl SimWorld {
             if self.units[i].attack_cd > 0.0 {
                 continue;
             }
+            let ut = self.units[i].unit_type;
             let ax = self.units[i].x;
             let ay = self.units[i].y;
-            let range = self.units[i].unit_type.range();
-            let dmg = self.units[i].unit_type.damage();
+            let range = ut.range();
             let my_team = alliances[i];
-            let mut did_attack = false;
+            let mut did_action = false;
 
-            for j in 0..n {
-                if i == j || alliances[j] == my_team {
-                    continue;
-                }
-                if dist(ax, ay, self.units[j].x, self.units[j].y) <= range {
-                    unit_dmg.push((j, dmg));
-                    did_attack = true;
-                    break;
-                }
-            }
-
-            if !did_attack {
-                for (ci, castle) in self.castles.iter().enumerate() {
-                    if !castle.alive() || castle_teams[ci] == my_team {
+            if ut.heal_power() > 0.0 {
+                let mut best: Option<(usize, f32)> = None;
+                for j in 0..n {
+                    if i == j || alliances[j] != my_team {
                         continue;
                     }
-                    if dist(ax, ay, castle.x, castle.y) <= CASTLE_ATTACK_RANGE.max(range) {
-                        castle_dmg.push((ci, dmg));
-                        did_attack = true;
-                        break;
+                    let missing = self.units[j].max_hp - self.units[j].hp;
+                    if missing <= 0.5 {
+                        continue;
+                    }
+                    if dist(ax, ay, self.units[j].x, self.units[j].y) <= range {
+                        if best.map(|(_, m)| missing > m).unwrap_or(true) {
+                            best = Some((j, missing));
+                        }
+                    }
+                }
+                if let Some((j, _)) = best {
+                    unit_heal.push((j, ut.heal_power()));
+                    did_action = true;
+                }
+            } else {
+                let mut primary: Option<usize> = None;
+                let mut best_d = f32::MAX;
+                for j in 0..n {
+                    if i == j || alliances[j] == my_team {
+                        continue;
+                    }
+                    let d = dist(ax, ay, self.units[j].x, self.units[j].y);
+                    if d <= range && d < best_d {
+                        best_d = d;
+                        primary = Some(j);
+                    }
+                }
+
+                if let Some(pj) = primary {
+                    match ut.targeting() {
+                        Targeting::Single => {
+                            let dmg = compute_unit_damage(ut, self.units[pj].unit_type);
+                            unit_dmg.push((pj, dmg));
+                            did_action = true;
+                        }
+                        Targeting::Multitarget { count } => {
+                            let mut hits: Vec<(usize, f32)> = Vec::new();
+                            for j in 0..n {
+                                if i == j || alliances[j] == my_team {
+                                    continue;
+                                }
+                                let d = dist(ax, ay, self.units[j].x, self.units[j].y);
+                                if d <= range {
+                                    hits.push((j, d));
+                                }
+                            }
+                            hits.sort_by(|a, b| {
+                                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Less)
+                            });
+                            for &(j, _) in hits.iter().take(count as usize) {
+                                let dmg = compute_unit_damage(ut, self.units[j].unit_type);
+                                unit_dmg.push((j, dmg));
+                            }
+                            did_action = !hits.is_empty();
+                        }
+                        Targeting::Aoe { radius } => {
+                            let (tx, ty) = (self.units[pj].x, self.units[pj].y);
+                            for j in 0..n {
+                                if alliances[j] == my_team {
+                                    continue;
+                                }
+                                if dist(tx, ty, self.units[j].x, self.units[j].y) <= radius {
+                                    let dmg = compute_unit_damage(ut, self.units[j].unit_type);
+                                    unit_dmg.push((j, dmg));
+                                }
+                            }
+                            did_action = true;
+                        }
+                    }
+                }
+
+                if !did_action {
+                    for (ci, castle) in self.castles.iter().enumerate() {
+                        if !castle.alive() || castle_teams[ci] == my_team {
+                            continue;
+                        }
+                        if dist(ax, ay, castle.x, castle.y) <= CASTLE_ATTACK_RANGE.max(range) {
+                            let armor = match ut.damage_type() {
+                                DamageType::Physical => CASTLE_ARMOR_PHYS,
+                                DamageType::Magical => CASTLE_ARMOR_MAG,
+                            };
+                            let pen = match ut.damage_type() {
+                                DamageType::Physical => ut.pen_phys(),
+                                DamageType::Magical => ut.pen_mag(),
+                            };
+                            let dmg = mitigate_damage(ut.damage(), armor, pen);
+                            castle_dmg.push((ci, dmg));
+                            did_action = true;
+                            break;
+                        }
                     }
                 }
             }
 
-            if did_attack {
+            if did_action {
                 attackers.push(i);
             }
         }
@@ -378,6 +670,12 @@ impl SimWorld {
                 self.units[j].hp -= dmg;
             }
         }
+        for (j, heal) in unit_heal {
+            if j < self.units.len() {
+                let u = &mut self.units[j];
+                u.hp = (u.hp + heal).min(u.max_hp);
+            }
+        }
         for (ci, dmg) in castle_dmg {
             if ci < self.castles.len() {
                 self.castles[ci].hp -= dmg;
@@ -385,7 +683,8 @@ impl SimWorld {
         }
         for i in attackers {
             if i < self.units.len() {
-                self.units[i].attack_cd = 0.45;
+                let cd = self.units[i].unit_type.attack_cooldown();
+                self.units[i].attack_cd = cd;
             }
         }
 
@@ -403,7 +702,12 @@ impl SimWorld {
                     continue;
                 }
                 if dist(cx, cy, unit.x, unit.y) <= CASTLE_ATTACK_RANGE {
-                    unit.hp -= CASTLE_DPS * TICK_DT;
+                    let dmg = mitigate_damage(
+                        CASTLE_DPS * TICK_DT,
+                        unit.unit_type.armor_phys(),
+                        0.0,
+                    );
+                    unit.hp -= dmg;
                 }
             }
         }
@@ -425,7 +729,6 @@ impl SimWorld {
                 .unwrap_or(TeamId(f.0))
         };
 
-        // Gather presence first (immutable pass)
         let presence_per_point: Vec<Vec<(FactionId, u32)>> = self
             .points
             .iter()
@@ -491,26 +794,61 @@ impl SimWorld {
     }
 }
 
-fn spawn_positions(n: usize) -> Vec<(f32, f32)> {
+fn compute_unit_damage(attacker: UnitType, defender: UnitType) -> f32 {
+    let (armor, pen) = match attacker.damage_type() {
+        DamageType::Physical => (defender.armor_phys(), attacker.pen_phys()),
+        DamageType::Magical => (defender.armor_mag(), attacker.pen_mag()),
+    };
+    mitigate_damage(attacker.damage(), armor, pen)
+}
+
+fn footprint_in_bounds(tx: i16, ty: i16, fw: u8, fh: u8) -> bool {
+    tx >= 0
+        && ty >= 0
+        && tx + fw as i16 <= MAP_TILES_X
+        && ty + fh as i16 <= MAP_TILES_Y
+}
+
+fn footprints_overlap(
+    ax: i16,
+    ay: i16,
+    aw: u8,
+    ah: u8,
+    bx: i16,
+    by: i16,
+    bw: u8,
+    bh: u8,
+) -> bool {
+    ax < bx + bw as i16 && ax + aw as i16 > bx && ay < by + bh as i16 && ay + ah as i16 > by
+}
+
+fn aabb_overlap(
+    ax: f32,
+    ay: f32,
+    ahw: f32,
+    ahh: f32,
+    bx: f32,
+    by: f32,
+    bhw: f32,
+    bhh: f32,
+) -> bool {
+    (ax - ahw) < (bx + bhw)
+        && (ax + ahw) > (bx - bhw)
+        && (ay - ahh) < (by + bhh)
+        && (ay + ahh) > (by - bhh)
+}
+
+fn spawn_tile_positions(n: usize) -> Vec<(i16, i16)> {
     match n {
-        2 => vec![
-            (120.0, MAP_HEIGHT * 0.5),
-            (MAP_WIDTH - 120.0, MAP_HEIGHT * 0.5),
-        ],
-        4 => vec![
-            (110.0, 110.0),
-            (110.0, MAP_HEIGHT - 110.0),
-            (MAP_WIDTH - 110.0, 110.0),
-            (MAP_WIDTH - 110.0, MAP_HEIGHT - 110.0),
-        ],
+        2 => vec![(2, 9), (26, 9)],
+        4 => vec![(2, 2), (2, 16), (26, 2), (26, 16)],
         _ => {
             let mut v = Vec::new();
             for i in 0..n {
                 let a = (i as f32 / n as f32) * std::f32::consts::TAU;
-                v.push((
-                    MAP_WIDTH * 0.5 + a.cos() * 320.0,
-                    MAP_HEIGHT * 0.5 + a.sin() * 220.0,
-                ));
+                let x = (MAP_WIDTH * 0.5 + a.cos() * 320.0) / TILE_SIZE;
+                let y = (MAP_HEIGHT * 0.5 + a.sin() * 220.0) / TILE_SIZE;
+                v.push((x as i16, y as i16));
             }
             v
         }
@@ -591,11 +929,31 @@ fn nearest_enemy_pos(
     my_team: TeamId,
     ux: f32,
     uy: f32,
-    snapshot: &[(u32, FactionId, TeamId, f32, f32, f32)],
+    snapshot: &[(u32, FactionId, TeamId, f32, f32, f32, UnitType, f32, f32)],
 ) -> Option<(f32, f32)> {
     let mut best = None;
-    for &(_id, _f, team, x, y, _) in snapshot {
+    for &(_id, _f, team, x, y, ..) in snapshot {
         if team == my_team {
+            continue;
+        }
+        let d = dist2(ux, uy, x, y);
+        if best.map(|(_, _, bd)| d < bd).unwrap_or(true) {
+            best = Some((x, y, d));
+        }
+    }
+    best.map(|(x, y, _)| (x, y))
+}
+
+fn nearest_wounded_ally(
+    my_team: TeamId,
+    self_id: u32,
+    ux: f32,
+    uy: f32,
+    snapshot: &[(u32, FactionId, TeamId, f32, f32, f32, UnitType, f32, f32)],
+) -> Option<(f32, f32)> {
+    let mut best = None;
+    for &(id, _f, team, x, y, _, _, hp, max_hp) in snapshot {
+        if id == self_id || team != my_team || hp >= max_hp - 0.5 {
             continue;
         }
         let d = dist2(ux, uy, x, y);
@@ -630,5 +988,37 @@ fn resolve_obstacles(unit: &mut SimUnit, obstacles: &[(f32, f32, f32, f32)]) {
                 unit.y = top;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::GameInput;
+    use crate::types::MatchConfig;
+
+    #[test]
+    fn mitigate_formula() {
+        let d = mitigate_damage(100.0, 100.0, 0.0);
+        assert!((d - 50.0).abs() < 0.01);
+        let d2 = mitigate_damage(100.0, 100.0, 50.0);
+        assert!((d2 - (100.0 * 100.0 / 150.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn place_barracks_near_castle() {
+        let mut world = SimWorld::new(MatchConfig::duel_vs_ai());
+        world.gold[0] = 100.0;
+        let site = world
+            .find_build_site(FactionId(0), BuildingKind::Barracks)
+            .expect("site");
+        let mut bus = InputBus::default();
+        bus.set(
+            FactionId(0),
+            GameInput::place(BuildingKind::Barracks, site.0, site.1),
+        );
+        let r = world.tick(&bus);
+        assert_eq!(r.buildings_placed, 1);
+        assert_eq!(world.buildings.len(), 1);
     }
 }

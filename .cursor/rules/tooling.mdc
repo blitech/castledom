@@ -1,0 +1,12 @@
+---
+description: Outils obligatoires pour explorer et exécuter (rtk, rg, memory)
+alwaysApply: true
+---
+
+# Tooling agent
+
+- **Exploration code** : `rtk rg` ou `rg` (ripgrep). Éviter de relire des fichiers entiers sans filtre.
+- **Shell bruyant** (build, test, git, tree) : préférer `rtk <cmd>` / `rtk test` / `rtk err` / `rtk summary`.
+- **Arborescence** : `rtk tree` ou `rtk ls`.
+- **Code Memory MCP** : si le namespace est disponible, chercher le contexte projet / décisions avant de réinventer ; enregistrer les décisions d’archi après une feature.
+- Si Code Memory MCP est absent : noter les décisions dans la spec ou `docs/`, ne pas bloquer.

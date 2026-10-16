@@ -1,5 +1,50 @@
-/target
-/dist
-/.cargo_home
+# Rust
+/target/
 **/*.rs.bk
+*.pdb
+
+# Cargo / local overrides
+/.cargo_home/
+.cargo/config.local.toml
+
+# Trunk / WASM build output
+/dist/
+*.wasm
+!**/assets/**/*.wasm
+
+# Codebase Memory (local graph DB)
+.codebase-memory/
+
+# RTK / local tooling caches (keep filters.toml tracked)
+.rtk/cache/
+.rtk/*.log
+
+# IDE / OS
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*~
 .DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs & local debug dumps
+*.log
+cdp-log.txt
+*.tmp
+*.temp
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+credentials.json
+
+# Python (tools/)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
