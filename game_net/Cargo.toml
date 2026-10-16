@@ -1,0 +1,14 @@
+[package]
+name = "game_net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Matchbox WebRTC + lockstep networking"
+
+[dependencies]
+game_core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bevy = { workspace = true }
+bevy_matchbox = { version = "0.14" }
+matchbox_socket = { version = "0.14" }

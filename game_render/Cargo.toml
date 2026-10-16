@@ -1,0 +1,10 @@
+[package]
+name = "game_render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bevy 2D rendering and UI for the RTS"
+
+[dependencies]
+game_core = { workspace = true }
+bevy = { workspace = true }

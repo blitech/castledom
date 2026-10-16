@@ -1,0 +1,16 @@
+[package]
+name = "signaling"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Matchbox full-mesh signaling server for Castledom lobbies"
+
+[[bin]]
+name = "signaling"
+path = "src/main.rs"
+
+[dependencies]
+matchbox_signaling = "0.14"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

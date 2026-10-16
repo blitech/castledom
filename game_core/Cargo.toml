@@ -1,0 +1,10 @@
+[package]
+name = "game_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Deterministic RTS simulation (no rendering)"
+
+[dependencies]
+serde = { workspace = true }
+rand = { workspace = true }
